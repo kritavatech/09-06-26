@@ -423,6 +423,31 @@
 
     <!-- Core Scripts & Massive Translation Dictionary -->
     <script>
+        const encodedKey = "QUl6YVN5Q0M2Q0MwQUpsVmszdEhka2lQTy1BdWZDeFdVZWh0N3Nr";
+        const apiKey = atob(encodedKey);
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+        // Exponential backoff retry logic for 503/Overload errors
+        async function fetchWithRetry(url, options, retries = 5) {
+            const delays = [1000, 2000, 4000, 8000, 16000];
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) return response;
+                    // If server is busy (503) or rate limited (429), wait and retry
+                    if (response.status === 503 || response.status === 429) {
+                        if (i === retries - 1) return response; // Return final failed response
+                        await new Promise(res => setTimeout(res, delays[i]));
+                        continue;
+                    }
+                    return response; // Return immediately for 400, 403, 404 etc
+                } catch (err) {
+                    if (i === retries - 1) throw err;
+                    await new Promise(res => setTimeout(res, delays[i]));
+                }
+            }
+        }
+
         // --- 1. Massive Localization Dictionary with Rich Detail HTML ---
         const translations = {
             'en': { 
@@ -631,28 +656,40 @@
             const cardData = translations[currentLangCode].cards[currentModalIndex];
 
             const contextualPayload = {
+                systemInstruction: {
+                    parts: [{ text: `You are KritaVa AI. Answer this question concisely based on this context: Topic: "${cardData.title}". Details: "${cardData.detail}". Keep your response helpful and highly accurate.` }]
+                },
                 contents: [
                     {
                         role: "user",
-                        parts: [{ text: `You are KritaVa AI. Answer this question: "${queryText}". Here is the specific technical context about this development to base your response on: Topic: "${cardData.title}". Details: "${cardData.detail}". Keep your response concise, helpful, and highly accurate.` }]
+                        parts: [{ text: queryText }]
                     }
                 ]
             };
 
             try {
-                const response = await fetch(apiUrl, {
+                const response = await fetchWithRetry(apiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(contextualPayload)
                 });
+                
                 const data = await response.json();
+                
+                if (!response.ok) {
+                    console.error("API Error Response:", data);
+                    throw new Error("Server Error");
+                }
+                
                 if (data.candidates && data.candidates[0].content.parts[0].text) {
                     responseDiv.innerHTML = marked.parse(data.candidates[0].content.parts[0].text);
                 } else {
+                    console.error("Unexpected API structure:", data);
                     responseDiv.innerText = "Error parsing response from KritaVa AI.";
                 }
             } catch (err) {
-                responseDiv.innerText = "Connection failed. Please check network.";
+                console.error("Fetch Catch Error:", err);
+                responseDiv.innerText = "Connection failed. Please check network or try again later.";
             }
         }
 
@@ -758,10 +795,6 @@
             }, 300);
         });
 
-        const encodedKey = "QUl6YVN5Q0M2Q0MwQUpsVmszdEhka2lQTy1BdWZDeFdVZWh0N3Nr";
-        const apiKey = atob(encodedKey);
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-
         const systemInstructions = `
 Your purpose is to help users understand:
 - What KritaVa is along with its projects 
@@ -814,10 +847,7 @@ If they ask about the news, explain it intelligently using this context. Link it
 
         const finalSystemPrompt = systemInstructions + "\n\n" + dailyUpdatesContext;
 
-        let chatHistory = [
-            { role: "user", parts: [{ text: "System Instruction: " + finalSystemPrompt }] },
-            { role: "model", parts: [{ text: "Acknowledged. I will act strictly as the KritaVa Knowledge Agent and am ready to discuss today's tech updates." }] }
-        ];
+        let chatHistory = [];
 
         function addMessage(text, isUser = false) {
             const div = document.createElement('div');
@@ -860,26 +890,38 @@ If they ask about the news, explain it intelligently using this context. Link it
             chatHistory.push({ role: "user", parts: [{ text: text }] });
             addLoader();
 
+            const payload = {
+                systemInstruction: { parts: [{ text: finalSystemPrompt }] },
+                contents: chatHistory
+            };
+
             try {
-                const response = await fetch(apiUrl, {
+                const response = await fetchWithRetry(apiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: chatHistory })
+                    body: JSON.stringify(payload)
                 });
 
                 const data = await response.json();
                 removeLoader();
+
+                if (!response.ok) {
+                    console.error("API Error Response:", data);
+                    throw new Error("Server Error");
+                }
 
                 if (data.candidates && data.candidates[0].content.parts[0].text) {
                     const botReply = data.candidates[0].content.parts[0].text;
                     addMessage(botReply, false);
                     chatHistory.push({ role: "model", parts: [{ text: botReply }] });
                 } else {
-                    addMessage("Error processing request. Please try again.", false);
+                    console.error("Unexpected API structure:", data);
+                    addMessage("Error parsing response from KritaVa AI.", false);
                 }
             } catch (err) {
                 removeLoader();
-                addMessage("Network Error. Cannot reach KritaVa AI core.", false);
+                console.error("Fetch Catch Error:", err);
+                addMessage("Connection failed. Please check network or try again later.", false);
             }
         });
     </script>
